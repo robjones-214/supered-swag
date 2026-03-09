@@ -1,2 +1,2 @@
 # supered-swag
-supered-swag
+Supered swag generator
