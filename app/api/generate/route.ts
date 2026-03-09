@@ -53,8 +53,7 @@ Return ONLY the prompt text. Nothing else.`,
       quality: "standard",
     });
 
-    const imageUrl = imageResponse.data[0].url;
-
+    const imageUrl = imageResponse.data?.[0]?.url ?? "";
     return NextResponse.json({
       ...brand,
       image_url: imageUrl,
