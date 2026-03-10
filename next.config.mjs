@@ -7,12 +7,9 @@ const nextConfig = {
         hostname: "assets.supered.io",
       },
       {
+        // OpenAI DALL-E image CDN
         protocol: "https",
-        hostname: "ideogram.ai",
-      },
-      {
-        protocol: "https",
-        hostname: "*.ideogram.ai",
+        hostname: "oaidalleapiprodscus.blob.core.windows.net",
       },
     ],
   },

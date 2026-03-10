@@ -3,7 +3,8 @@ import Anthropic from "@anthropic-ai/sdk";
 import { crawlUrl, parseHtml, crawlResultToText } from "@/lib/crawl";
 import type { BrandAnalysis } from "@/lib/types";
 
-const client = new Anthropic();
+let _client: Anthropic | null = null;
+const getClient = () => (_client ??= new Anthropic());
 
 const BRAND_ANALYSIS_PROMPT = `You are a brand analyst and creative director preparing for an AI image generation task.
 
@@ -121,7 +122,7 @@ export async function POST(req: NextRequest) {
 
     const prompt = BRAND_ANALYSIS_PROMPT.replace("{{EXTRACTED_CONTENT}}", extractedContent);
 
-    const stream = client.messages.stream({
+    const stream = getClient().messages.stream({
       model: "claude-opus-4-6",
       max_tokens: 2048,
       thinking: { type: "adaptive" },
@@ -141,7 +142,7 @@ export async function POST(req: NextRequest) {
       brand = JSON.parse(cleaned) as BrandAnalysis;
     } catch {
       // Retry with stricter prompt
-      const retryMessage = await client.messages.create({
+      const retryMessage = await getClient().messages.create({
         model: "claude-opus-4-6",
         max_tokens: 2048,
         messages: [{

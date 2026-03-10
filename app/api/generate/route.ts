@@ -1,13 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
+import OpenAI from "openai";
 import { kv } from "@vercel/kv";
 import { nanoid } from "nanoid";
 import { uploadImageFromUrl } from "@/lib/storage";
 import type { BrandAnalysis, GenerationResult } from "@/lib/types";
 
-const anthropic = new Anthropic();
+let _anthropic: Anthropic | null = null;
+let _openai: OpenAI | null = null;
+const getAnthropic = () => (_anthropic ??= new Anthropic());
+const getOpenAI = () => (_openai ??= new OpenAI());
 
-const IMAGE_PROMPT_TEMPLATE = `You are a creative director writing a prompt for the Ideogram AI image generator.
+const IMAGE_PROMPT_TEMPLATE = `You are a creative director writing a prompt for DALL-E 3.
 
 THE CARDINAL RULE — never violate this:
   CHARACTER = the user's brand identity (their colors, their mascot, their person, their vibe)
@@ -34,28 +38,21 @@ SWAG INFO:
 
 {{swag_instructions}}
 
-PERSONAL BRAND SPECIAL INSTRUCTION (only if brand_type === "personal"):
-  The character is an AI-illustrated stylized portrait of a real person. Do NOT attempt photorealism.
-  Instead: bold editorial illustration style, like a high-end magazine cover or concert poster portrait.
-  Capture their described energy and personality visually. They are wearing/interacting with the Supered swag.
-  Make them look like a superhero version of themselves.
+{{personal_brand_instruction}}
 
 STYLE REQUIREMENTS (apply to all):
   - Art style: bold vector illustration OR bold editorial illustration — NOT photorealistic, NOT 3D render
   - Mood: confident, heroic, a little playful — mascot poster or concert poster energy
   - Background: use the user's brand colors subtly (flat color, gradient wash, or simple environment)
-  - Portrait orientation 2:3 ratio, optimized for LinkedIn sharing
+  - Portrait orientation (taller than wide, 2:3 ratio)
   - No text in image EXCEPT "SUPERED" on the swag item
   - Clean composition, uncluttered, high visual impact at thumbnail size
 
-Write the full Ideogram prompt for {{brand_name}}. Return only the prompt. Nothing else.`;
+Write the full DALL-E 3 image prompt for {{brand_name}}. Return only the prompt. Nothing else.`;
 
 function buildSwagInstructions(swagItem: string): string {
-  const luxuryItems = [
-    "lamborghini", "yacht", "jet", "rolex", "throne",
-    "trophy", "rocket", "arcade", "check", "helicopter",
-  ];
-  const isLuxury = luxuryItems.some(l => swagItem.toLowerCase().includes(l));
+  const luxuryKeywords = ["lamborghini", "yacht", "jet", "rolex", "throne", "trophy", "rocket", "arcade", "check", "helicopter"];
+  const isLuxury = luxuryKeywords.some(k => swagItem.toLowerCase().includes(k));
 
   if (isLuxury) {
     return `[LUXURY/OBJECT SWAG]:
@@ -68,13 +65,20 @@ function buildSwagInstructions(swagItem: string): string {
   The ${swagItem} is Supered-branded. It features the word "SUPERED" in bold heavy all-caps display
   lettering PLUS a lightning bolt icon. Choose the swag color from Supered's palette that contrasts
   best with the character — hot pink, cobalt blue, gold, aqua, or navy.
-  CRITICAL: The "SUPERED" text on the swag must be clearly legible. Emphasize this to Ideogram.`;
+  CRITICAL: The "SUPERED" text on the swag must be clearly legible.`;
 }
 
 async function buildImagePrompt(brand: BrandAnalysis): Promise<string> {
   const swagInstructions = buildSwagInstructions(brand.swag_item);
+  const personalBrandInstruction = brand.brand_type === "personal"
+    ? `[PERSONAL BRAND]:
+  The character is an AI-illustrated stylized portrait of a real person. Do NOT attempt photorealism.
+  Bold editorial illustration style — like a high-end magazine cover or concert poster.
+  Capture their energy and personality. They wear/interact with the Supered swag.
+  Make them look like a superhero version of themselves.`
+    : "";
 
-  let promptTemplate = IMAGE_PROMPT_TEMPLATE
+  const prompt = IMAGE_PROMPT_TEMPLATE
     .replace(/{{brand_type}}/g, brand.brand_type)
     .replace(/{{agent_character}}/g, brand.agent_character)
     .replace(/{{brand_character_details}}/g, brand.brand_character_details || "")
@@ -84,17 +88,13 @@ async function buildImagePrompt(brand: BrandAnalysis): Promise<string> {
     .replace(/{{brand_name}}/g, brand.brand_name)
     .replace(/{{pose_variation_seed}}/g, brand.pose_variation_seed)
     .replace(/{{swag_item}}/g, brand.swag_item)
-    .replace(/{{swag_instructions}}/g, swagInstructions);
+    .replace(/{{swag_instructions}}/g, swagInstructions)
+    .replace(/{{personal_brand_instruction}}/g, personalBrandInstruction);
 
-  // Remove personal brand instructions if not personal
-  if (brand.brand_type !== "personal") {
-    promptTemplate = promptTemplate.replace(/PERSONAL BRAND SPECIAL INSTRUCTION[\s\S]*?Make them look like a superhero version of themselves\./m, "");
-  }
-
-  const message = await anthropic.messages.create({
+  const message = await getAnthropic().messages.create({
     model: "claude-opus-4-6",
     max_tokens: 1024,
-    messages: [{ role: "user", content: promptTemplate }],
+    messages: [{ role: "user", content: prompt }],
   });
 
   const textBlock = message.content.find(b => b.type === "text");
@@ -102,33 +102,18 @@ async function buildImagePrompt(brand: BrandAnalysis): Promise<string> {
   return textBlock.text.trim();
 }
 
-async function generateWithIdeogram(imagePrompt: string): Promise<string> {
-  const response = await fetch("https://api.ideogram.ai/generate", {
-    method: "POST",
-    headers: {
-      "Api-Key": process.env.IDEOGRAM_API_KEY!,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      image_request: {
-        prompt: imagePrompt,
-        aspect_ratio: "ASPECT_2_3",
-        model: "V_2_TURBO",
-        magic_prompt_option: "OFF",
-        style_type: "ILLUSTRATION",
-      },
-    }),
+async function generateWithDallE(imagePrompt: string): Promise<string> {
+  const response = await getOpenAI().images.generate({
+    model: "dall-e-3",
+    prompt: imagePrompt,
+    n: 1,
+    size: "1024x1792",
+    quality: "standard",
   });
 
-  if (!response.ok) {
-    const errText = await response.text();
-    throw new Error(`Ideogram API error ${response.status}: ${errText}`);
-  }
-
-  const data = await response.json() as { data: Array<{ url: string }> };
-  const tempUrl = data.data?.[0]?.url;
-  if (!tempUrl) throw new Error("No image URL returned from Ideogram");
-  return tempUrl;
+  const url = response.data?.[0]?.url;
+  if (!url) throw new Error("No image URL returned from DALL-E");
+  return url;
 }
 
 export async function POST(req: NextRequest) {
@@ -136,7 +121,6 @@ export async function POST(req: NextRequest) {
     const body = await req.json() as { brand: BrandAnalysis; swag_item?: string };
     const brand: BrandAnalysis = body.brand || (body as unknown as BrandAnalysis);
 
-    // Allow swag swap — override the item
     if (body.swag_item) {
       brand.swag_item = body.swag_item;
     }
@@ -144,16 +128,16 @@ export async function POST(req: NextRequest) {
     // Step 1: Claude writes the image prompt
     const imagePrompt = await buildImagePrompt(brand);
 
-    // Step 2: Ideogram generates the image
+    // Step 2: DALL-E 3 generates the image
     let tempImageUrl: string;
     try {
-      tempImageUrl = await generateWithIdeogram(imagePrompt);
-    } catch (ideogramErr) {
-      console.error("Ideogram failed:", ideogramErr);
+      tempImageUrl = await generateWithDallE(imagePrompt);
+    } catch (dallEErr) {
+      console.error("DALL-E failed:", dallEErr);
       return NextResponse.json({ error: "image_generation_failed" }, { status: 500 });
     }
 
-    // Step 3: Upload to R2 for permanent URL
+    // Step 3: Upload to R2 for a permanent URL
     const resultId = nanoid(10);
     let permanentUrl = tempImageUrl;
     let warning: string | undefined;
@@ -163,10 +147,9 @@ export async function POST(req: NextRequest) {
     } catch (r2Err) {
       console.error("R2 upload failed:", r2Err);
       warning = "temp_url";
-      // Fall back to temp URL
     }
 
-    // Step 4: Store result in Vercel KV
+    // Step 4: Store result in Vercel KV (30-day TTL)
     const result: GenerationResult = {
       id: resultId,
       brand_analysis: brand,
@@ -176,10 +159,9 @@ export async function POST(req: NextRequest) {
     };
 
     try {
-      await kv.set(`result:${resultId}`, result, { ex: 2592000 }); // 30 days
+      await kv.set(`result:${resultId}`, result, { ex: 2592000 });
     } catch (kvErr) {
       console.error("KV storage failed:", kvErr);
-      // Not fatal — result still returned
     }
 
     return NextResponse.json({
